@@ -1,6 +1,15 @@
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/opencv.hpp>
+#pragma once
+//#include <stdafx.h>
+#include <iostream>
+#include "timer.h"
+#include "utils.h"
+#include <string>
+#include <stdio.h>
+#include <cvaux.h>
+#include <highgui.h>
+#include <cxcore.hpp>
+#include <cv.hpp>
+#include <highgui.hpp>
 #include "utils.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -34,6 +43,7 @@ void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
   checkCudaErrors(cudaFree(0));
 
   cv::Mat image = cv::imread(filename.c_str(), CV_LOAD_IMAGE_COLOR);
+  //cv::Mat image = cv::imread("D:/priv/cover.jpg");
   if (image.empty()) {
     std::cerr << "Couldn't open file: " << filename << std::endl;
     exit(1);

@@ -44,7 +44,13 @@ int main(int argc, char **argv) {
 
   std::string input_file;
   std::string output_file;
-  if (argc == 3) {
+ 
+  if (argc == 1) 
+  {
+    input_file  = "D:/priv/cinque_terre_small.jpg";
+    output_file = "D:/priv/cinque_terre_small_blur.jpg";
+  }
+ else if (argc == 3) {
     input_file  = std::string(argv[1]);
     output_file = std::string(argv[2]);
   }
