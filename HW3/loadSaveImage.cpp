@@ -1,7 +1,14 @@
+//#include <cvaux.h>
+//#include <highgui.h>
+//#include <cxcore.hpp>
+//#include <cv.hpp>
+//#include <highgui.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/opencv.hpp>
+
 #include <vector>
+#include <iostream>
 #include "cuda_runtime.h"
 
 //The caller becomes responsible for the returned pointer. This
@@ -9,11 +16,14 @@
 //In production code this is a bad idea - we should use RAII
 //to ensure the memory is freed.  DO NOT COPY THIS AND USE IN PRODUCTION
 //CODE!!!
+using namespace cv;
+using namespace std;
 void loadImageHDR(const std::string &filename,
                   float **imagePtr,
                   size_t *numRows, size_t *numCols)
 {
   cv::Mat image = cv::imread(filename.c_str(), CV_LOAD_IMAGE_COLOR | CV_LOAD_IMAGE_ANYDEPTH);
+
   if (image.empty()) {
     std::cerr << "Couldn't open file: " << filename << std::endl;
     exit(1);
@@ -29,6 +39,7 @@ void loadImageHDR(const std::string &filename,
     exit(1);
   }
 
+  int type = image.type();
   *imagePtr = new float[image.rows * image.cols * image.channels()];
 
   float *cvPtr = image.ptr<float>(0);
@@ -83,7 +94,9 @@ void saveImageRGBA(const uchar4* const image,
   int sizes[2];
   sizes[0] = numRows;
   sizes[1] = numCols;
-  cv::Mat imageRGBA(2, sizes, CV_8UC4, (void *)image);
+  size_t steps = 0;
+  cv::Mat imageRGBA(numRows, numCols, CV_8UC4, (void *)image, steps);
+  //cv::Mat imageRGBA(2, sizes, CV_8UC4, (void *)image,);
   cv::Mat imageOutputBGR;
   cv::cvtColor(imageRGBA, imageOutputBGR, CV_RGBA2BGR);
   //output the image
@@ -99,8 +112,9 @@ void saveImageHDR(const float* const image,
   int sizes[2];
   sizes[0] = numRows;
   sizes[1] = numCols;
-
-  cv::Mat imageHDR(2, sizes, CV_32FC3, (void *)image);
+	size_t steps = 0;
+  //cv::Mat imageHDR(2, sizes, CV_32FC3, (void *)image);
+	cv::Mat imageHDR(numRows, numCols, CV_32FC3, (void *)image, steps);	
 
   imageHDR = imageHDR * 255;
 

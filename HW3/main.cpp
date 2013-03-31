@@ -34,6 +34,11 @@ int main(int argc, char **argv) {
     input_file  = std::string(argv[1]);
     output_file = std::string(argv[2]);
   }
+  else if (argc == 1)
+  {
+	input_file = "C:/Users/Michal/Documents/GitHub/cs344/HW3/memorial.exr";
+	output_file = "C:/Users/Michal/Documents/GitHub/cs344/HW3/memorial_raw_large_mod.png";
+  }
   else {
     std::cerr << "Usage: ./hw input_file output_file" << std::endl;
     exit(1);

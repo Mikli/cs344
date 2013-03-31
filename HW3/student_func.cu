@@ -83,6 +83,232 @@
 #include "reference_calc.cpp"
 #include "utils.h"
 
+__global__ void find_max_min(const float* const logLuminance,
+							 float* const maxs_per_block,
+							 float* const mins_per_block,
+							 const size_t numRows,
+							 const size_t numCols)
+{
+	extern __shared__ float this_block[];
+	float *this_block_max = &this_block[0];
+	float *this_block_min = &this_block[blockDim.x];
+	int col = threadIdx.x + blockDim.x * blockIdx.x;
+	int tid = threadIdx.x;
+
+	if (col >= numRows * numCols)
+		return;
+
+	this_block_max[tid] = this_block_min[tid] = logLuminance[col];
+	
+	__syncthreads();
+
+	for (unsigned int s = blockDim.x / 2; s > 0; s>>=1)
+	{
+		if (tid < s)
+		{
+			this_block_max[tid] = fmaxf(this_block_max[tid],this_block_max[tid+s]);
+			this_block_min[tid] = fminf(this_block_min[tid],this_block_min[tid+s]);
+		}
+		__syncthreads();
+	}
+
+	// after previous alg, the result is in the first index
+	if (tid == 0)
+	{
+		maxs_per_block[blockIdx.x] = this_block_max[0];
+		mins_per_block[blockIdx.x] = this_block_min[0];
+	}
+
+
+}
+
+__global__ void reduce_max_linear(float* const input_of_maxs)
+{
+	extern __shared__ float block_memory[];
+	int tid = threadIdx.x;
+	unsigned int size = blockDim.x;
+
+	if (size % 2 != 0)
+	{
+		size++;
+	}
+
+	block_memory[tid] = input_of_maxs[tid];
+
+	__syncthreads();
+
+	for (unsigned int s = size / 2; s > 0; s>>=1)
+	{
+		if (tid < s)
+		{
+			block_memory[tid] = fmaxf(block_memory[tid],block_memory[tid+s]);
+		}
+		__syncthreads();
+	}
+
+	if (tid == 0)
+	{
+		input_of_maxs[0] = block_memory[0];
+	}
+}
+
+__global__ void reduce_min_linear(float* const input_of_mins)
+{
+	extern __shared__ float block_memory[];
+	int tid = threadIdx.x;
+	unsigned int size = blockDim.x;
+
+	if (size % 2 != 0)
+	{
+		size++;
+	}
+	block_memory[tid] = input_of_mins[tid];
+	
+	__syncthreads();
+
+	for (unsigned int s = size / 2; s > 0; s>>=1)
+	{
+		if (tid < s)
+		{
+			block_memory[tid] = fminf(block_memory[tid],block_memory[tid+s]);
+		}
+		__syncthreads();
+	}
+
+	if (tid == 0)
+	{
+		input_of_mins[0] = block_memory[0];
+	}
+}
+
+float *d_maxs_for_blocks, *d_mins_for_blocks;
+
+#include<stdio.h>
+
+static float find_max_ref(const float* const tab, unsigned int no_of_elem)
+{
+	float m = 0.0;
+	unsigned int max_index = 0;
+
+	for(unsigned int i = 0; i<no_of_elem; i++)
+	{
+		if (tab[i] > m) m = tab[i];
+		max_index = i;
+	}
+	return m;
+}
+
+static float find_min_ref(const float* const tab, unsigned int no_of_elem)
+{
+	float m = 0.0;
+	unsigned int max_index = 0;
+
+	for(unsigned int i = 0; i<no_of_elem; i++)
+	{
+		if (tab[i] < m)
+		{
+			m = tab[i];
+			max_index = i;
+		}
+	}
+	return m;
+}
+
+__global__ void make_histo(unsigned int* const d_hist,
+						   const float* const d_logLuminance,
+						   const float lumMin,
+						   const float lumRange,
+						   const size_t numBins,
+						   const size_t numRows,
+						   const size_t numCols)
+{
+extern __shared__ unsigned int block_bins[];
+	
+	int col = threadIdx.x + blockDim.x * blockIdx.x;
+		
+	if (col >= (numRows * numCols))
+		return;
+
+  	unsigned int bins_per_thread = numBins/blockDim.x;
+	
+    unsigned int i = threadIdx.x * bins_per_thread;
+
+    while (i < ((threadIdx.x + 1) * bins_per_thread))
+	{
+        block_bins[i] = 0;
+        i++;
+    }
+
+    __syncthreads();
+
+	unsigned int bin = ((d_logLuminance[col] - lumMin) / lumRange) * numBins - 1;
+
+	atomicAdd(&(block_bins[bin]),1);
+	
+	__syncthreads();
+	i = threadIdx.x * bins_per_thread;
+	/* now block_bins is ready, count how many threads we have and let them add to global bins */
+	while (i < ((threadIdx.x + 1) * bins_per_thread))
+	{
+        atomicAdd(&(d_hist[i]),block_bins[i]);
+        i++;
+    }
+	
+}
+
+__global__ void scan_hillis_steele(const unsigned int* const d_histogram,
+                               unsigned int* const d_cdf, 
+                               const size_t cdf_size)
+{
+    extern __shared__ unsigned int scan[];
+    unsigned int offset;
+    unsigned int steps = log2((float)cdf_size);
+
+    unsigned int col = threadIdx.x;
+
+    scan[col] = d_histogram[col];
+    
+    __syncthreads();       
+    unsigned int new_value = 0;
+    for(unsigned int i = 0; i < steps; i++)
+    {
+       offset = 1 << i;
+       if (col < offset)
+       {
+           //just get the same value
+           new_value = scan[col];
+       }
+       else
+       {
+           new_value = scan[col] + scan[col-offset];
+       }   
+       __syncthreads();
+       
+       scan[col] = new_value;
+       __syncthreads();
+    }
+
+    // make it inclusive
+    d_cdf[col] = scan[col] - d_histogram[col];
+}
+
+
+
+
+bool testHisto(const unsigned int* const histo, size_t len, unsigned int expected_value)
+{
+	unsigned int sum = 0;
+	for(unsigned int s = 0; s < len; s++)
+		sum += histo[s];
+
+	if (sum == expected_value)
+		return true;
+	else
+		return false;
+
+}
+
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -91,7 +317,81 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
+
+	size_t BLOCK_WIDTH = 512 ;//* filterWidth;
+	size_t BLOCK_HEIGHT = 1 ;//* filterWidth;
+	
+	const dim3 blockSize(BLOCK_WIDTH,BLOCK_HEIGHT,1);
+	const dim3 gridSize(numRows * numCols / BLOCK_WIDTH + 1, 1, 1);
+
+	float *maxs_for_blocks = new float[gridSize.x];
+	float *mins_for_blocks = new float[gridSize.x];
+
+
+	//float *logLum = new float[numRows * numCols];
+
+	unsigned int *d_histogram;
+	//unsigned int *h_histogram = new unsigned int[numBins];
+
+	//checkCudaErrors(cudaMemcpy(logLum,d_logLuminance,sizeof(float) * numRows * numCols,cudaMemcpyDeviceToHost));
+
+	checkCudaErrors(cudaMalloc(&d_maxs_for_blocks,  sizeof(float) * gridSize.x));
+	checkCudaErrors(cudaMemset(d_maxs_for_blocks, 0, sizeof(float) * gridSize.x));
+	checkCudaErrors(cudaMalloc(&d_mins_for_blocks,  sizeof(float) * gridSize.x));
+	checkCudaErrors(cudaMemset(d_mins_for_blocks, 0, sizeof(float) * gridSize.x));
+
+	checkCudaErrors(cudaMalloc(&d_histogram,  sizeof(unsigned int) * numBins));
+	checkCudaErrors(cudaMemset(d_histogram, 0, sizeof(unsigned int) * numBins));
+
+
+	//printf("%d, %d, %d\n", blockSize.x, blockSize.y, blockSize.z);
+	//printf("%d, %d, %d\n", gridSize.x, gridSize.y, gridSize.z);
+
+	//float float_min = find_min_ref(logLum, numRows * numCols);
+    //float float_max = find_max_ref(logLum, numRows * numCols);
+
+	find_max_min<<<gridSize,blockSize, sizeof(float) * BLOCK_WIDTH * 2>>>(d_logLuminance, d_maxs_for_blocks, d_mins_for_blocks, numRows, numCols);
+
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	
+	//checkCudaErrors(cudaMemcpy(maxs_for_blocks,d_maxs_for_blocks,sizeof(float) * gridSize.x,cudaMemcpyDeviceToHost));
+	//checkCudaErrors(cudaMemcpy(mins_for_blocks,d_mins_for_blocks,sizeof(float) * gridSize.x,cudaMemcpyDeviceToHost));
+
+	//printf("%f, %f\n", find_min_ref(mins_for_blocks, gridSize.x),find_max_ref(maxs_for_blocks, gridSize.x));
+
+	// threads are as many as blocks were
+	int threads_for_reduce = numRows * numCols / BLOCK_WIDTH + 1;
+
+	reduce_max_linear<<<1,threads_for_reduce,sizeof(float) * threads_for_reduce + 4>>>(d_maxs_for_blocks);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	//checkCudaErrors(cudaMemcpy(maxs_for_blocks,d_maxs_for_blocks,sizeof(float) * gridSize.x,cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(&max_logLum,d_maxs_for_blocks,sizeof(float),cudaMemcpyDeviceToHost));
+
+	reduce_min_linear<<<1,threads_for_reduce,sizeof(float) * threads_for_reduce + 4>>>(d_mins_for_blocks);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	//checkCudaErrors(cudaMemcpy(mins_for_blocks,d_mins_for_blocks,sizeof(float) * gridSize.x,cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&min_logLum,d_mins_for_blocks,sizeof(float),cudaMemcpyDeviceToHost));
+    
+	//min_logLum = mins_for_blocks[0];
+	//max_logLum = maxs_for_blocks[0];
+
+	float lumRange = max_logLum - min_logLum;
+
+	make_histo<<<gridSize,blockSize,sizeof(unsigned int) * numBins>>>(d_histogram,
+	                d_logLuminance, min_logLum, lumRange, numBins, numRows, numCols);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	//checkCudaErrors(cudaMemcpy(h_histogram,d_histogram,sizeof(unsigned int) * numBins,cudaMemcpyDeviceToHost));
+	//testHisto(h_histogram, numBins, numRows * numCols);
+	//printf("%f, %f\n", maxs_for_blocks[0], mins_for_blocks[0]);
+	
+    scan_hillis_steele<<<1,numBins,sizeof(unsigned int) * numBins>>>(d_histogram,
+                                                                    d_cdf,
+                                                                    numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    //checkCudaErrors(cudaMemcpy(h_histogram,d_cdf,sizeof(unsigned int) * numBins,cudaMemcpyDeviceToHost));
+	//testHisto(h_histogram, numBins, numRows * numCols);
+
+	//TODO
   /*Here are the steps you need to implement
     1) find the minimum and maximum value in the input logLuminance channel
        store in min_logLum and max_logLum
@@ -117,7 +417,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   * the two and will output the first location they differ.                   *
   * ************************************************************************* */
 
-  /* float *h_logLuminance = new float[numRows * numCols];
+  /*float *h_logLuminance = new float[numRows * numCols];
   unsigned int *h_cdf   = new unsigned int[numBins];
   unsigned int *h_your_cdf = new unsigned int[numBins];
   checkCudaErrors(cudaMemcpy(h_logLuminance, d_logLuminance, numCols * numRows * sizeof(float), cudaMemcpyDeviceToHost));
@@ -130,5 +430,10 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
  
   delete[] h_logLuminance;
   delete[] h_cdf; 
-  delete[] h_your_cdf; */
+  delete[] h_your_cdf;*/
+
+	delete[] maxs_for_blocks;
+	delete[] mins_for_blocks;
+	checkCudaErrors(cudaFree(d_maxs_for_blocks));
+	checkCudaErrors(cudaFree(d_mins_for_blocks));
 }

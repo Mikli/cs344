@@ -1,7 +1,7 @@
 #ifndef GPU_TIMER_H__
 #define GPU_TIMER_H__
 
-#include <cuda_runtime.h>
+#include "cuda_runtime.h"
 
 struct GpuTimer
 {
